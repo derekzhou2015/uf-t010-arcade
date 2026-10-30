@@ -1,0 +1,65 @@
+
+# IDEs
+*.sublime-project
+*.sublime-workspace
+.idea/
+/.vscode/
+*.wpr
+*.wpu
+
+# virualenvs
+env
+.env
+.venv
+ENV/
+env/
+venv*/
+.venv*/
+
+# docs
+doc/api_docs/api/*.rst
+/doc/api_docs/resources.rst
+doc/api_docs/quick_index.rst
+doc/example_code/images/thumbs/
+doc/example_code/how_to_examples/thumbs/
+
+# testing
+.pytest_cache/
+.coveralls.yml
+.mypy_cache/
+tests/test_examples/test.png
+stress_test*.csv
+arcade/examples/test.png
+arcade/examples/stress*.csv
+
+# covereage
+htmlcov/
+.coverage
+
+# build
+.eggs/
+dist/
+build/
+arcade.egg-info/
+__pycache__
+
+# osx
+.DS_Store
+
+# local testing/mocking
+test.py
+pip-wheel-metadata/
+temp/
+
+# Tiled Session for project
+*.tiled-session
+
+# Pyenv local
+.python-version
+
+.flake8
+
+webplayground/**/*.whl
+webplayground/**/*.zip
+.claude/skills/*
+.specify/*
