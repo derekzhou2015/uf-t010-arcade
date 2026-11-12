@@ -50,8 +50,10 @@ loading maps, but you can also convert manually:
     # Convert back
     offset_again = cube.to_offset("even-r")
 
-The offset system must match your map's configuration. Tiled hex maps typically
-use ``"even-r"`` (staggered rows, even rows shifted right).
+The offset system must match your map's configuration. Arcade picks the
+matching system automatically from the map's ``staggeraxis`` and
+``staggerindex`` values: ``y``/``odd`` is ``odd-r``, ``y``/``even`` is
+``even-r``, ``x``/``odd`` is ``odd-q`` and ``x``/``even`` is ``even-q``.
 
 Hex Layout
 ----------
@@ -77,8 +79,11 @@ on screen. It contains three pieces of information:
 
 .. note::
 
-    Tiled always uses **pointy-top** orientation for hexagonal maps.
-    Use ``pointy_orientation`` when loading Tiled hex maps.
+    Tiled uses pointy-top hexagons when the stagger axis is ``y`` and
+    flat-top hexagons when it is ``x``. When loading a map through
+    :func:`arcade.load_tilemap` you do not need to construct a
+    :class:`~arcade.hexagon.Layout` at all; the orientation is derived from
+    the map metadata.
 
 Computing the Hex Size from Tiled
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -111,80 +116,87 @@ derivation.
 Loading a Hex Map from Tiled
 -----------------------------
 
-Loading a hexagonal tilemap works just like loading a regular tilemap, with one
-extra parameter: ``hex_layout``. This tells Arcade how to convert hex coordinates
-to pixel positions.
-
-Here is a complete example:
+Hexagonal tilemaps load exactly like regular tilemaps. Arcade reads the
+``orientation``, ``staggeraxis``, ``staggerindex`` and ``hexsidelength``
+values saved in the Tiled file and positions every tile with Tiled's own
+pixel formulas, so the four stagger combinations (two axes times odd/even)
+all render the same way they do in the editor:
 
 .. code-block:: python
 
-    import math
-    from pyglet.math import Vec2
-
     import arcade
-    from arcade import hexagon
-
-    WINDOW_WIDTH = 1280
-    WINDOW_HEIGHT = 720
-
 
     class GameView(arcade.View):
 
-        def __init__(self):
-            super().__init__()
-            self.tile_map: arcade.TileMap
-            self.scene: arcade.Scene
-
         def reset(self):
-            # Tiled always uses pointy-top orientation
-            orientation = hexagon.pointy_orientation
-
-            # Calculate hex size from the tile dimensions in your .tmj file
-            hex_size_x = 120 / math.sqrt(3)
-            hex_size_y = 140 / 2
-
-            hex_layout = hexagon.Layout(
-                orientation=orientation,
-                size=Vec2(hex_size_x, hex_size_y),
-                origin=Vec2(0, 0),
-            )
-
-            # Load the hex tilemap -- note the hex_layout parameter
-            self.tile_map = arcade.load_tilemap(
-                ":resources:tiled_maps/hex_map.tmj",
-                hex_layout=hex_layout,
-                use_spatial_hash=True,
-            )
-
-            # Create a Scene from the tilemap, just like a square map
+            # No extra layout argument is required: everything is derived
+            # from the map metadata.
+            self.tile_map = arcade.load_tilemap("my_hex_map.tmj")
             self.scene = arcade.Scene.from_tilemap(self.tile_map)
-
             self.background_color = arcade.color.BLACK
 
-        def on_draw(self):
-            self.clear()
-            self.scene.draw()
+The ``scaling`` argument scales both the tile images *and* the hexagonal
+spacing, so a map loaded with ``scaling=2.0`` keeps its tiles edge-to-edge
+on high-resolution displays instead of overlapping.
 
+For programmatic use outside of map loading, the geometry is exposed on the
+loaded map and as a standalone class:
 
-    def main():
-        window = arcade.Window(WINDOW_WIDTH, WINDOW_HEIGHT, "Hex Map")
-        game = GameView()
-        window.show_view(game)
-        game.reset()
-        arcade.run()
+.. code-block:: python
 
-
-    if __name__ == "__main__":
-        main()
-
-The key difference from a regular tilemap is the ``hex_layout`` parameter passed to
-:func:`arcade.load_tilemap`. Without it, Arcade treats the map as a square grid.
-With it, Arcade uses hex coordinate math to position each tile correctly.
+    tile_map = arcade.load_tilemap("my_hex_map.tmj")
+    geometry = tile_map.hex_geometry            # arcade.HexMapGeometry
+    center_x, center_y = geometry.tile_center(column=3, row=2)
 
 Everything else -- creating a Scene, drawing, using layers -- works the same as
 with square tilemaps. See :ref:`platformer_part_twelve` for the general tilemap
 loading tutorial.
+
+Migrating from the old ``hex_layout`` argument
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Older Arcade versions ignored the map's stagger metadata and required a
+manually constructed :class:`~arcade.hexagon.Layout` passed as
+``hex_layout``. That parameter still works (it takes precedence and emits a
+``DeprecationWarning``), but new code should omit it:
+
+.. code-block:: python
+
+    # Old (still works, deprecated):
+    import math
+    from pyglet.math import Vec2
+    from arcade import hexagon
+
+    hex_layout = hexagon.Layout(
+        orientation=hexagon.pointy_orientation,
+        size=Vec2(120 / math.sqrt(3), 140 / 2),
+        origin=Vec2(0, 0),
+    )
+    tile_map = arcade.load_tilemap("my_hex_map.tmj", hex_layout=hex_layout)
+
+    # New: the layout is derived from staggeraxis/staggerindex/hexsidelength.
+    tile_map = arcade.load_tilemap("my_hex_map.tmj")
+
+Because the old manual layout did not honor the map's stagger settings, an
+existing project can look different after the switch. That means the new
+rendering now matches Tiled; if you deliberately tuned assets to the old
+positions, force the previous behavior while migrating:
+
+.. code-block:: python
+
+    tile_map = arcade.load_tilemap("my_hex_map.tmj", hex_map_mode="square")
+
+``hex_map_mode`` accepts:
+
+- ``"auto"`` (default): hexagonal maps use the metadata-driven Tiled
+  formulas; other orientations keep their square grid.
+- ``"square"``: hexagonal tiles are placed on a plain square grid, exactly
+  like loading without ``hex_layout`` did previously.
+- ``"hex"``: force hexagonal positioning; raises ``ValueError`` if the map
+  is not hexagonal.
+
+Rectangular (square-grid) maps and their tutorials are unaffected by any of
+these settings.
 
 Working with Hex Tiles in Code
 -------------------------------
@@ -245,14 +257,15 @@ To create your own hexagonal map in Tiled:
 1. Open Tiled and select **File > New > New Map**
 2. Set **Map Orientation** to ``Hexagonal``
 3. Set **Tile Render Order** to ``Right Down``
-4. Set **Stagger Axis** to ``Y`` and **Stagger Index** to ``Odd``
+4. Set **Stagger Axis** (``y`` for pointy-top rows, ``x`` for flat-top
+   columns) and **Stagger Index** (``Odd`` or ``Even``). Arcade honors all
+   four combinations, so pick whichever your art requires.
 5. Set your desired **Tile Width** and **Tile Height**
 6. Set the **Hex Side Length** (this controls how "tall" the flat edges are)
 7. Create your tileset and start painting
 
-When loading the map in Arcade, make sure your Layout's ``size`` values match
-the tile dimensions as shown in the `Computing the Hex Size from Tiled`_ section
-above.
+Arcade reads all of these settings when the map is loaded, so unlike older
+versions there is no manual layout math to keep in sync with the file.
 
 Full Example
 ------------

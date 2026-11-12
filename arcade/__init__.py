@@ -205,6 +205,7 @@ from .scene import SceneKeyError
 from .physics_engines import PhysicsEnginePlatformer
 from .physics_engines import PhysicsEngineSimple
 
+from .tilemap import HexMapGeometry
 from .tilemap import load_tilemap
 from .tilemap import TileMap
 
@@ -320,6 +321,7 @@ __all__ = [
     "TextureCacheManager",
     "SpriteSheet",
     "DefaultTextureAtlas",
+    "HexMapGeometry",
     "TileMap",
     "VERSION",
     "Vec2",

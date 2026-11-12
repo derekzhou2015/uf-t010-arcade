@@ -5,13 +5,9 @@ If Python and Arcade are installed, this example can be run from the command lin
 python -m arcade.examples.hex_map
 """
 
-import math
 from operator import add
 
-from pyglet.math import Vec2
-
 import arcade
-from arcade import hexagon
 
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 720
@@ -45,23 +41,10 @@ class GameView(arcade.View):
         """Reset the game to the initial state."""
         # Do changes needed to restart the game here
 
-        # Tiled always uses pointy orientations
-        orientation = hexagon.pointy_orientation
-        #
-        hex_size_x = 120 / math.sqrt(3)
-        hex_size_y = 140 / 2
-        map_origin = Vec2(0, 0)
-
-        hex_layout = hexagon.Layout(
-            orientation=orientation,
-            size=Vec2(hex_size_x, hex_size_y),
-            origin=map_origin,
-        )
-
-        # Load our TileMap
+        # The map's stagger axis, stagger index and hex side length are read
+        # straight from the Tiled file, so no manual layout math is needed.
         self.tile_map = arcade.load_tilemap(
             ":resources:tiled_maps/hex_map.tmj",
-            hex_layout=hex_layout,
             use_spatial_hash=True,
         )
 

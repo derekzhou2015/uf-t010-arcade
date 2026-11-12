@@ -16,7 +16,7 @@ import warnings
 from collections import OrderedDict
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import PIL.Image
 import PIL.ImageChops
@@ -51,9 +51,166 @@ _FLIPPED_HORIZONTALLY_FLAG = 0x80000000
 _FLIPPED_VERTICALLY_FLAG = 0x40000000
 _FLIPPED_DIAGONALLY_FLAG = 0x20000000
 
-__all__ = ["TileMap", "load_tilemap"]
+__all__ = ["HexMapGeometry", "TileMap", "load_tilemap"]
 
 prop_to_float = cast(Callable[[pytiled_parser.Property], float], float)
+
+#: How a hexagonal Tiled map should be positioned when loaded.
+HexMapMode = Literal["auto", "square", "hex"]
+
+
+class HexMapGeometry:
+    """Pixel geometry of a staggered hexagonal Tiled map.
+
+    The values mirror the ``RenderParams`` struct in Tiled's own
+    ``HexagonalRenderer`` (see the Tiled source, ``src/libtiled/
+    hexagonalrenderer.cpp``), so tile centers land exactly where Tiled
+    places them, only flipped vertically to match Arcade's Y-up coordinate
+    system.
+
+    Tiled distinguishes four stagger combinations:
+
+    - ``staggeraxis = "y"``  -> pointy-top hexes, rows are staggered
+      (``staggerindex`` ``"odd"``/``"even"`` => ``odd-r``/``even-r``)
+    - ``staggeraxis = "x"``  -> flat-top hexes, columns are staggered
+      (``staggerindex`` ``"odd"``/``"even"`` => ``odd-q``/``even-q``)
+
+    All length arguments are in *already scaled* pixels. To apply a map
+    scaling factor, construct the geometry from the unscaled Tiled values
+    multiplied by that factor; every spacing below then scales with it as
+    well.
+
+    Args:
+        tile_width: Scaled width of a tile bounding rectangle.
+        tile_height: Scaled height of a tile bounding rectangle.
+        hex_side_length: Scaled value of Tiled's ``hexsidelength``.
+        stagger_axis: Tiled's ``staggeraxis``, ``"x"`` or ``"y"``.
+        stagger_index: Tiled's ``staggerindex``, ``"odd"`` or ``"even"``.
+        map_width: Map width in tiles (needed for the vertical axis flip).
+        map_height: Map height in tiles (needed for the vertical axis flip).
+    """
+
+    def __init__(
+        self,
+        tile_width: float,
+        tile_height: float,
+        hex_side_length: float,
+        stagger_axis: str,
+        stagger_index: str,
+        map_width: float,
+        map_height: float,
+    ) -> None:
+        if stagger_axis not in ("x", "y"):
+            raise ValueError(
+                f"Invalid stagger axis {stagger_axis!r}. Tiled hexagonal maps require "
+                "'staggeraxis' to be 'x' or 'y'."
+            )
+        if stagger_index not in ("odd", "even"):
+            raise ValueError(
+                f"Invalid stagger index {stagger_index!r}. Tiled hexagonal maps require "
+                "'staggerindex' to be 'odd' or 'even'."
+            )
+
+        self.stagger_axis = stagger_axis
+        self.stagger_index = stagger_index
+        self.stagger_x = stagger_axis == "x"
+        self._stagger_even = stagger_index == "even"
+        self.map_width = map_width
+        self.map_height = map_height
+
+        # Mirrors Tiled's RenderParams constructor.
+        if self.stagger_x:
+            self.side_length_x = hex_side_length
+            self.side_length_y = 0.0
+        else:
+            self.side_length_x = 0.0
+            self.side_length_y = hex_side_length
+
+        self.side_offset_x = (tile_width - self.side_length_x) / 2.0
+        self.side_offset_y = (tile_height - self.side_length_y) / 2.0
+        self.column_width = self.side_offset_x + self.side_length_x
+        self.row_height = self.side_offset_y + self.side_length_y
+        self.tile_width = self.column_width + self.side_offset_x
+        self.tile_height = self.row_height + self.side_offset_y
+
+    @property
+    def offset_system(self) -> hexagon.offset_system:
+        """Red Blob Games offset-system name matching this Tiled map."""
+        if self.stagger_x:
+            return "even-q" if self._stagger_even else "odd-q"
+        return "even-r" if self._stagger_even else "odd-r"
+
+    def _do_stagger(self, index: int) -> bool:
+        """Tiled's ``doStaggerX``/``doStaggerY`` check for an axis index."""
+        return bool((index & 1) ^ self._stagger_even)
+
+    def tiled_pixel_size(self) -> tuple[float, float]:
+        """Scaled pixel size of the whole map, matching Tiled's bounding rect."""
+        if self.stagger_x:
+            width = self.map_width * self.column_width + self.side_offset_x
+            height = self.map_height * (self.tile_height + self.side_length_y)
+            if self.map_width > 1:
+                height += self.row_height
+        else:
+            width = self.map_width * (self.tile_width + self.side_length_x)
+            height = self.map_height * self.row_height + self.side_offset_y
+            if self.map_height > 1:
+                width += self.column_width
+        return width, height
+
+    def tile_top_left(self, column: int, row: int) -> tuple[float, float]:
+        """Top-left corner of a tile in Tiled's Y-down screen coordinates.
+
+        This is a direct port of Tiled's
+        ``HexagonalRenderer::tileToScreenCoords``.
+        """
+        if self.stagger_x:
+            pixel_y = row * (self.tile_height + self.side_length_y)
+            if self._do_stagger(column):
+                pixel_y += self.row_height
+            pixel_x = column * self.column_width
+        else:
+            pixel_x = column * (self.tile_width + self.side_length_x)
+            if self._do_stagger(row):
+                pixel_x += self.column_width
+            pixel_y = row * self.row_height
+        return pixel_x, pixel_y
+
+    def tile_center(self, column: int, row: int) -> tuple[float, float]:
+        """Center of a tile in Arcade's Y-up world coordinates.
+
+        Tiled measures from the top-left with Y pointing down; Arcade
+        sprites use centers with Y pointing up, so the position is flipped
+        around the map's scaled pixel height.
+        """
+        pixel_x, pixel_y = self.tile_top_left(column, row)
+        _, map_pixel_height = self.tiled_pixel_size()
+        center_x = pixel_x + self.tile_width / 2.0
+        # Flip the *center* (not the top-left) vertically.
+        center_y = map_pixel_height - (pixel_y + self.tile_height / 2.0)
+        return center_x, center_y
+
+
+def _hex_geometry_from_map(
+    tiled_map: pytiled_parser.TiledMap,
+    scaling: float,
+) -> HexMapGeometry:
+    """Build :class:`HexMapGeometry` from a parsed hexagonal Tiled map."""
+    if tiled_map.hex_side_length is None:
+        raise ValueError(
+            "Map is marked hexagonal but is missing the required 'hexsidelength' "
+            "property. Re-save the map in Tiled."
+        )
+
+    return HexMapGeometry(
+        tile_width=tiled_map.tile_size.width * scaling,
+        tile_height=tiled_map.tile_size.height * scaling,
+        hex_side_length=tiled_map.hex_side_length * scaling,
+        stagger_axis=tiled_map.stagger_axis or "y",
+        stagger_index=tiled_map.stagger_index or "odd",
+        map_width=tiled_map.map_size.width,
+        map_height=tiled_map.map_size.height,
+    )
 
 
 def _get_image_info_from_tileset(tile: pytiled_parser.Tile) -> tuple[int, int, int, int]:
@@ -175,6 +332,27 @@ class TileMap:
             The hex layout to use for the map. If not supplied, the map will be
             treated as a square map. If supplied, the map will be treated as a hexagonal map.
 
+            .. deprecated::
+                Kept for backwards compatibility. Hexagonal maps now read their
+                layout automatically from the Tiled metadata via
+                ``hex_map_mode="auto"`` (the default).
+        hex_map_mode:
+            Controls how maps whose Tiled ``orientation`` is ``hexagonal`` are
+            positioned:
+
+            - ``"auto"`` (default): read ``staggeraxis``, ``staggerindex`` and
+              ``hexsidelength`` from the map metadata and place tiles using
+              Tiled's own hexagonal pixel formulas. An explicitly supplied
+              ``hex_layout`` still takes precedence.
+            - ``"square"``: keep the legacy behavior of laying hexagonal tiles
+              out on a plain square grid. This is the migration escape hatch
+              for assets that were tuned to the old, incorrect layout.
+            - ``"hex"``: force hexagonal positioning. Equivalent to ``"auto"``
+              for hexagonal maps, and raises ``ValueError`` on non-hex maps.
+
+            Orthogonal, isometric and staggered maps are always placed on
+            their square grid regardless of this option.
+
 
     The ``layer_options`` parameter can be used to specify per layer arguments.
     The available options for this are:
@@ -258,7 +436,12 @@ class TileMap:
         lazy: bool = False,
         texture_cache_manager: arcade.TextureCacheManager | None = None,
         hex_layout: hexagon.Layout | None = None,
+        hex_map_mode: HexMapMode = "auto",
     ) -> None:
+        if hex_map_mode not in ("auto", "square", "hex"):
+            raise ValueError(
+                f"hex_map_mode must be 'auto', 'square' or 'hex', got {hex_map_mode!r}."
+            )
         if not map_file and not tiled_map:
             raise AttributeError(
                 "Initialized TileMap with an empty map_file or no tiled_map argument"
@@ -285,7 +468,36 @@ class TileMap:
             except RuntimeError:
                 pass
 
+        if hex_layout is not None:
+            warnings.warn(
+                "The 'hex_layout' parameter is deprecated. Hexagonal Tiled maps now "
+                "derive their layout automatically from the map metadata "
+                "(hex_map_mode='auto'). Passing hex_layout still works and takes "
+                "precedence, but will be removed in a future release.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         self.hex_layout = hex_layout
+        self.hex_map_mode: HexMapMode = hex_map_mode
+
+        # Hexagonal maps know their own stagger configuration in the Tiled
+        # metadata. In "auto" mode we honor it unless a legacy hex_layout was
+        # handed in explicitly; "square" forces the old grid layout; "hex"
+        # requires a hexagonal map.
+        is_hexagonal = self.tiled_map.orientation == "hexagonal"
+        if hex_map_mode == "hex" and not is_hexagonal:
+            raise ValueError(
+                "hex_map_mode='hex' was requested, but the map orientation is "
+                f"{self.tiled_map.orientation!r}, not 'hexagonal'."
+            )
+
+        self.hex_geometry: HexMapGeometry | None = None
+        if is_hexagonal and hex_layout is None and hex_map_mode != "square":
+            self.hex_geometry = _hex_geometry_from_map(self.tiled_map, scaling)
+
+        # True while tile layers need the hexagonal positioning code path.
+        self._use_hex_positioning = hex_layout is not None or self.hex_geometry is not None
 
         self._lazy = lazy
         self.texture_cache_manager = texture_cache_manager or arcade.texture.default_texture_cache
@@ -796,7 +1008,7 @@ class TileMap:
             lazy=self._lazy,
         )
 
-        if self.hex_layout is None:
+        if not self._use_hex_positioning:
             map_array = layer.data
             if TYPE_CHECKING:
                 # Can never be None because we already detect and reject infinite maps
@@ -866,6 +1078,68 @@ class TileMap:
 
         # FIXME: get tile size from tileset
 
+        if self.hex_geometry is not None:
+            # New path: positions follow Tiled's own hexagonal formulas, with
+            # the map's stagger axis/index, side length and scaling all read
+            # from (or derived from) the map metadata. A per-layer scaling
+            # (from layer_options) rebuilds the geometry at that scaling.
+            geometry = self.hex_geometry
+            if scaling != self.scaling:
+                geometry = _hex_geometry_from_map(self.tiled_map, scaling)
+            for row_index, row in enumerate(map_array):
+                for column_index, item in enumerate(row):
+                    # Check for an empty tile
+                    if item == 0:
+                        continue
+
+                    tile = self._get_tile_by_gid(item)
+                    if tile is None:
+                        msg = (
+                            f"Couldn't find tile for item {item} in layer "
+                            f"'{layer.name}' in file '{self.tiled_map.map_file}'"
+                            f"at ({column_index}, {row_index})."
+                        )
+                        raise ValueError(msg)
+
+                    my_sprite = self._create_sprite_from_tile(
+                        tile,
+                        scaling=scaling,
+                        hit_box_algorithm=hit_box_algorithm,
+                        custom_class=custom_class,
+                        custom_class_args=custom_class_args,
+                    )
+
+                    if my_sprite is None:
+                        print(
+                            f"Warning: Could not create sprite number {item} "
+                            f"in layer '{layer.name}' {tile.image}"
+                        )
+                    else:
+                        center_x, center_y = geometry.tile_center(column_index, row_index)
+                        my_sprite.center_x = center_x + offset[0]
+                        my_sprite.center_y = center_y + offset[1]
+
+                        # Tint
+                        if layer.tint_color:
+                            my_sprite.color = ArcadeColor.from_iterable(layer.tint_color)
+
+                        # Opacity
+                        opacity = layer.opacity
+                        if opacity:
+                            my_sprite.alpha = int(opacity * 255)
+
+                        sprite_list.visible = layer.visible
+                        sprite_list.append(my_sprite)
+
+                    if layer.properties:
+                        sprite_list.properties = layer.properties
+
+            return sprite_list
+
+        # Legacy path: a caller-supplied hex_layout. Kept unchanged for
+        # backwards compatibility; new code should rely on the automatic
+        # metadata-driven path above.
+        assert self.hex_layout is not None  # guaranteed by _use_hex_positioning
         # Loop through the layer and add in the list
         for row_index, row in enumerate(reversed(map_array)):
             for column_index, item in enumerate(row):
@@ -1128,6 +1402,7 @@ def load_tilemap(
     texture_atlas: DefaultTextureAtlas | None = None,
     lazy: bool = False,
     hex_layout: hexagon.Layout | None = None,
+    hex_map_mode: HexMapMode = "auto",
 ) -> TileMap:
     """
     Given a .json map file, loads in and returns a `TileMap` object.
@@ -1164,6 +1439,16 @@ def load_tilemap(
         hex_layout:
             The hex layout to use for the map. If not supplied, the map will be
             treated as a square map. If supplied, the map will be treated as a hexagonal map.
+
+            .. deprecated::
+                Hexagonal maps now configure themselves automatically from the
+                Tiled metadata. See ``hex_map_mode``.
+        hex_map_mode:
+            How hexagonal maps are positioned: ``"auto"`` (default) honors the
+            map's ``staggeraxis``, ``staggerindex`` and ``hexsidelength``
+            metadata; ``"square"`` restores the legacy square-grid layout;
+            ``"hex"`` forces hexagonal positioning and raises on non-hex maps.
+            Has no effect on non-hexagonal maps.
     """
     return TileMap(
         map_file=map_file,
@@ -1175,4 +1460,5 @@ def load_tilemap(
         texture_atlas=texture_atlas,
         lazy=lazy,
         hex_layout=hex_layout,
+        hex_map_mode=hex_map_mode,
     )
